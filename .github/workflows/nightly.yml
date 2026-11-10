@@ -1,0 +1,33 @@
+name: Nightly line data
+
+on:
+  schedule:
+    # 01:30 UTC = 02:30 Prague (winter) / 03:30 (summer)
+    - cron: "30 1 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate docs/lines from the PID GTFS feed
+        shell: pwsh
+        run: ./generate.ps1
+
+      - name: Commit if changed
+        run: |
+          git config user.name "pid-data bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add docs
+          if git diff --cached --quiet -- docs/lines; then
+            echo "Line data unchanged."
+          else
+            git commit -m "Line data $(date -u +%Y-%m-%d)"
+            git push
+          fi
