@@ -9,6 +9,9 @@
     (sum of its name's character codes) mod 128. Each file:
       { "Florenc": [ ["U689Z2P", "B", ["3", "6", ...], ["Kobylisy", ...]], ... ], ... }
     Non-ASCII characters are written as \uXXXX. Also writes docs/meta.json.
+    Route shapes of the trips that stop in Prague are simplified (Douglas-Peucker,
+    10 m) and written to docs/shapes/<shape_id>.json as {"p":[lat0,lon0,dlat,dlon,...]}
+    (integers in 1/100000 degree; first point absolute, then differences).
     Runs with PowerShell 7 (GitHub Actions, Linux) and Windows PowerShell 5.1.
 
 .EXAMPLE
@@ -34,7 +37,7 @@ Write-Host ("Downloaded {0:N0} bytes" -f (Get-Item $zip).Length)
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::OpenRead($zip)
 try {
-    foreach ($fileName in @("stops.txt", "routes.txt", "trips.txt", "stop_times.txt")) {
+    foreach ($fileName in @("stops.txt", "routes.txt", "trips.txt", "stop_times.txt", "shapes.txt")) {
         $entry = $archive.Entries | Where-Object { $_.Name -eq $fileName } | Select-Object -First 1
         if ($null -eq $entry) { throw "$fileName not found in the GTFS zip" }
         [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $tmp $fileName), $true)
@@ -94,17 +97,20 @@ foreach ($r in (Import-Csv -Path (Join-Path $tmp "routes.txt") -Encoding UTF8)) 
 }
 $tripRoute = New-Object 'System.Collections.Generic.Dictionary[string,string]'
 $tripHead = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+$tripShape = New-Object 'System.Collections.Generic.Dictionary[string,string]'
 foreach ($t in (Import-Csv -Path (Join-Path $tmp "trips.txt") -Encoding UTF8)) {
     $rn = $routeName["$($t.route_id)"]
     if ($null -eq $rn -or $rn -eq "") { continue }
     $tripRoute["$($t.trip_id)"] = $rn
     $tripHead["$($t.trip_id)"] = "$($t.trip_headsign)".Trim()
+    $tripShape["$($t.trip_id)"] = "$($t.shape_id)".Trim()
 }
 Write-Host ("Routes: {0:N0}, trips: {1:N0}" -f $routeName.Count, $tripRoute.Count)
 
 # stop_times.txt is large: stream it line by line.
 $platLines = @{}
 $platHeads = @{}
+$needShapes = New-Object 'System.Collections.Generic.HashSet[string]'
 $reader = New-Object IO.StreamReader((Join-Path $tmp "stop_times.txt"), [Text.Encoding]::UTF8)
 try {
     $header = $reader.ReadLine().Split(",")
@@ -123,6 +129,9 @@ try {
         $rn = $null
         if (-not $tripRoute.TryGetValue($tid, [ref]$rn)) { continue }
         $hs = $tripHead[$tid]
+        # Its route shape is needed (the trip stops in Prague).
+        $shp = $null
+        if ($tripShape.TryGetValue($tid, [ref]$shp) -and $shp -ne "") { [void]$needShapes.Add($shp) }
         # A trip that ends at this stop does not depart from it.
         if ($hs -eq $p[0]) { continue }
         if (-not $platLines.ContainsKey($sid)) {
@@ -178,7 +187,105 @@ for ($b = 0; $b -lt $Buckets; $b++) {
     $total += $text.Length
     if ($text.Length -gt $largest) { $largest = $text.Length }
 }
-$meta = '{"generated":"' + [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") + '","stops":' + $byName.Count + ',"buckets":' + $Buckets + '}'
+# ---- Route shapes (route map, PID app docs/specs/route-map.md) ----------------
+
+# Douglas-Peucker on one shape; returns the indexes to keep. Distances in metres
+# (equirectangular around the first point), point-to-segment.
+function Get-SimplifiedIndexes([double[]]$lat, [double[]]$lon, [double]$tol) {
+    $n = $lat.Length
+    if ($n -le 2) { return 0..($n - 1) }
+    $k = [math]::Cos($lat[0] * [math]::PI / 180) * 111320.0
+    $x = New-Object double[] $n
+    $y = New-Object double[] $n
+    for ($i = 0; $i -lt $n; $i++) { $x[$i] = $lon[$i] * $k; $y[$i] = $lat[$i] * 111320.0 }
+    $keep = New-Object bool[] $n
+    $keep[0] = $true; $keep[$n - 1] = $true
+    $stack = New-Object 'System.Collections.Generic.Stack[int[]]'
+    $stack.Push(@(0, ($n - 1)))
+    while ($stack.Count -gt 0) {
+        $seg = $stack.Pop()
+        $a = $seg[0]; $b = $seg[1]
+        if ($b - $a -lt 2) { continue }
+        $dx = $x[$b] - $x[$a]; $dy = $y[$b] - $y[$a]
+        $len2 = $dx * $dx + $dy * $dy
+        $best = -1.0; $bi = -1
+        for ($i = $a + 1; $i -lt $b; $i++) {
+            $px = $x[$i] - $x[$a]; $py = $y[$i] - $y[$a]
+            if ($len2 -gt 0) {
+                $t = ($px * $dx + $py * $dy) / $len2
+                if ($t -lt 0) { $t = 0 } elseif ($t -gt 1) { $t = 1 }
+                $ex = $px - $t * $dx; $ey = $py - $t * $dy
+            } else {
+                $ex = $px; $ey = $py
+            }
+            $d2 = $ex * $ex + $ey * $ey
+            if ($d2 -gt $best) { $best = $d2; $bi = $i }
+        }
+        if ($best -gt $tol * $tol) {
+            $keep[$bi] = $true
+            $stack.Push(@($a, $bi))
+            $stack.Push(@($bi, $b))
+        }
+    }
+    $out = New-Object System.Collections.Generic.List[int]
+    for ($i = 0; $i -lt $n; $i++) { if ($keep[$i]) { $out.Add($i) } }
+    return ,$out.ToArray()
+}
+
+$shapeDir = Join-Path (Join-Path $PSScriptRoot "docs") "shapes"
+if (Test-Path $shapeDir) { Remove-Item -Recurse -Force $shapeDir }
+New-Item -ItemType Directory -Force -Path $shapeDir | Out-Null
+$shapePts = @{}   # shape_id -> List of @(seq, lat, lon)
+$inv = [Globalization.CultureInfo]::InvariantCulture
+$reader = New-Object IO.StreamReader((Join-Path $tmp "shapes.txt"), [Text.Encoding]::UTF8)
+try {
+    $header = $reader.ReadLine().Split(",")
+    $iId = [Array]::IndexOf($header, "shape_id")
+    $iLat = [Array]::IndexOf($header, "shape_pt_lat")
+    $iLon = [Array]::IndexOf($header, "shape_pt_lon")
+    $iSeq = [Array]::IndexOf($header, "shape_pt_sequence")
+    if ($iId -lt 0 -or $iLat -lt 0 -or $iLon -lt 0 -or $iSeq -lt 0) { throw "shapes.txt: columns not found" }
+    while ($null -ne ($line = $reader.ReadLine())) {
+        $f = if ($line.IndexOf('"') -ge 0) { Split-CsvLine $line } else { $line.Split(",") }
+        $id = $f[$iId]
+        if (-not $needShapes.Contains($id)) { continue }
+        if (-not $shapePts.ContainsKey($id)) { $shapePts[$id] = New-Object System.Collections.Generic.List[object] }
+        $shapePts[$id].Add(@([int]$f[$iSeq], [double]::Parse($f[$iLat], $inv), [double]::Parse($f[$iLon], $inv)))
+    }
+} finally {
+    $reader.Dispose()
+}
+
+$shapeBytes = 0
+$shapeLargest = 0
+$shapePoints = 0
+foreach ($id in $shapePts.Keys) {
+    $pts = @($shapePts[$id] | Sort-Object { $_[0] })
+    $lat = [double[]]($pts | ForEach-Object { $_[1] })
+    $lon = [double[]]($pts | ForEach-Object { $_[2] })
+    $idx = Get-SimplifiedIndexes $lat $lon 10.0
+    $sb = New-Object Text.StringBuilder
+    [void]$sb.Append('{"p":[')
+    $pa = 0; $po = 0
+    for ($j = 0; $j -lt $idx.Length; $j++) {
+        $qa = [int][math]::Round($lat[$idx[$j]] * 100000)
+        $qo = [int][math]::Round($lon[$idx[$j]] * 100000)
+        if ($j -gt 0) { [void]$sb.Append(",") }
+        [void]$sb.Append(([string]($qa - $pa)) + "," + ([string]($qo - $po)))
+        $pa = $qa; $po = $qo
+    }
+    [void]$sb.Append(']}')
+    $text = $sb.ToString()
+    $file = ($id -replace '[^A-Za-z0-9_-]', '_') + ".json"
+    [IO.File]::WriteAllText((Join-Path $shapeDir $file), $text, $utf8)
+    $shapeBytes += $text.Length
+    $shapePoints += $idx.Length
+    if ($text.Length -gt $shapeLargest) { $shapeLargest = $text.Length }
+}
+Write-Host ("Shapes: {0:N0} files, {1:N0} points, {2:N0} bytes, largest {3:N0} bytes" -f $shapePts.Count, $shapePoints, $shapeBytes, $shapeLargest)
+if ($shapePts.ContainsKey("L12V2")) { Write-Host ("Check: L12V2 -> " + (Get-Content -Raw (Join-Path $shapeDir "L12V2.json")).Length + " bytes") }
+
+$meta = '{"generated":"' + [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") + '","stops":' + $byName.Count + ',"buckets":' + $Buckets + ',"shapes":' + $shapePts.Count + '}'
 [IO.File]::WriteAllText((Join-Path (Join-Path $PSScriptRoot "docs") "meta.json"), $meta, $utf8)
 
 Write-Host ("Stops: {0:N0}; {1} files, {2:N0} bytes, largest {3:N0} bytes" -f $byName.Count, $Buckets, $total, $largest)
