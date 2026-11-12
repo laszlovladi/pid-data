@@ -61,7 +61,12 @@ def overpass(flt):
                                      headers={"User-Agent": "pid-data map (github.com/laszlovladi/pid-data)"})
         try:
             with urllib.request.urlopen(req, timeout=240) as r:
-                return json.load(r)
+                d = json.load(r)
+            # A busy server can answer 200 with no elements and a "remark".
+            if d.get("elements"):
+                return d
+            print("overpass empty", attempt, url, d.get("remark", ""), file=sys.stderr)
+            time.sleep(20)
         except Exception as ex:  # noqa: BLE001
             print("overpass retry", attempt, url, ex, file=sys.stderr)
             time.sleep(20)
