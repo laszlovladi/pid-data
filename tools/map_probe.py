@@ -42,15 +42,19 @@ def overpass(filter_):
     s, w, n, e = BBOX
     q = f'[out:json][timeout:180][bbox:{s},{w},{n},{e}];({filter_};);out geom;'
     data = urllib.parse.urlencode({"data": q}).encode()
-    req = urllib.request.Request("https://overpass-api.de/api/interpreter", data=data,
-                                 headers={"User-Agent": "pid-data map probe (github.com/laszlovladi/pid-data)"})
-    for attempt in range(3):
+    servers = ["https://overpass-api.de/api/interpreter",
+               "https://overpass.kumi.systems/api/interpreter",
+               "https://overpass.private.coffee/api/interpreter"]
+    for attempt in range(6):
+        url = servers[attempt % len(servers)]
+        req = urllib.request.Request(url, data=data,
+                                     headers={"User-Agent": "pid-data map probe (github.com/laszlovladi/pid-data)"})
         try:
             with urllib.request.urlopen(req, timeout=240) as r:
                 return json.load(r)
         except Exception as ex:  # noqa: BLE001
-            print("overpass retry", attempt, ex, file=sys.stderr)
-            time.sleep(30)
+            print("overpass retry", attempt, url, ex, file=sys.stderr)
+            time.sleep(20)
     raise SystemExit("Overpass failed")
 
 
