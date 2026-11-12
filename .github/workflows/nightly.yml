@@ -20,12 +20,15 @@ jobs:
         shell: pwsh
         run: ./generate.ps1
 
+      - name: Line maps of the stops (docs/stops, from the same GTFS files)
+        run: python3 tools/build_stops.py
+
       - name: Commit if changed
         run: |
           git config user.name "pid-data bot"
           git config user.email "actions@users.noreply.github.com"
           git add docs
-          if git diff --cached --quiet -- docs/lines docs/shapes; then
+          if git diff --cached --quiet -- docs/lines docs/shapes docs/stops; then
             echo "Line data unchanged."
           else
             git commit -m "Line data $(date -u +%Y-%m-%d)"
