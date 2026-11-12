@@ -4,10 +4,14 @@ Runs in the nightly job after generate.ps1 and reuses its extracted GTFS files
 (<temp>/pid-gtfs). For every Prague stop name it writes the lines leaving the
 stop, each as the usual street path from the stop onward:
 
-  docs/stops/<key>.json    spider: paths cut 3.5 km from the stop, 15 m
-  docs/stops/<key>_w.json  whole: paths to the terminus, 50 m
+  docs/stops/<key>.json    spider: paths cut 2.2 km from the stop, 20 m (more if too big)
+  docs/stops/<key>_w.json  whole: paths to the terminus, 80 m (more if too big)
 
-  {"s":[lat,lon], "l":[[route, headsign, platformId, lat0, lon0, dlat1, dlon1, ...], ...]}
+  {"s":[lat,lon], "l":[[route, headsigns, platformId, lat0, lon0, dlat1, dlon1, ...], ...]}
+
+One entry per line and platform: the most frequent path; headsigns of all its
+trips joined with "|" (for the watch's direction filter). Combinations with
+fewer than MIN_TRIPS trips in the feed (diversions, depot runs) are left out.
 
 Integers in 1/100000 degree. <key> = FNV-1a 32-bit of the stop name's UTF-8
 bytes, 8 hex digits (the watch computes the same).
@@ -23,10 +27,11 @@ from collections import Counter, defaultdict
 
 SRC = os.path.join(tempfile.gettempdir(), "pid-gtfs")
 OUT = "docs/stops"
-SPIDER_M = 3500
-SPIDER_TOL = 15
-WHOLE_TOL = 50
+SPIDER_M = 2200
+SPIDER_TOL = 20
+WHOLE_TOL = 80
 MAX_BYTES = 12 * 1024
+MIN_TRIPS = 3
 M_LAT = 1.1132
 M_LON = 1.1132 * math.cos(math.radians(50.08))
 
@@ -91,6 +96,25 @@ def write(path, stop, entries):
     return len(s)
 
 
+def shrink(path, centre, entries, tol):
+    """Writes the file; while too big, simplifies the paths more (tolerance doubled)."""
+    size = write(path, centre, entries)
+    while size > MAX_BYTES and tol < 640:
+        tol *= 2
+        redone = []
+        for e in entries:
+            lat, lon = e[3], e[4]
+            line = [(lat, lon)]
+            for i in range(5, len(e) - 1, 2):
+                lat += e[i]
+                lon += e[i + 1]
+                line.append((lat, lon))
+            redone.append(encode(e[:3], simplify(line, tol)))
+        entries = redone
+        size = write(path, centre, entries)
+    return size
+
+
 def main():
     plat = {}  # stop_id -> (name, (lat, lon))
     for r in rows("stops.txt"):
@@ -109,8 +133,9 @@ def main():
             trips[t["trip_id"]] = (rn, (t.get("trip_headsign") or "").strip(), t["shape_id"].strip())
     print(f"Prague platforms {len(plat)}, trips {len(trips)}")
 
-    # (platform, route, headsign) -> Counter(shape_id); (platform, shape_id) -> shape_dist_traveled
+    # (platform, route) -> Counter(shape_id) and Counter(headsign); (platform, shape_id) -> shape_dist_traveled
     use = defaultdict(Counter)
+    heads = defaultdict(Counter)
     dist_at = {}
     n = 0
     for r in rows("stop_times.txt"):
@@ -121,13 +146,15 @@ def main():
         t = trips.get(r["trip_id"])
         if t is None:
             continue
-        use[(sid, t[0], t[1])][t[2]] += 1
+        use[(sid, t[0])][t[2]] += 1
+        heads[(sid, t[0])][t[1]] += 1
         d = (r.get("shape_dist_traveled") or "").strip()
         if d and (sid, t[2]) not in dist_at:
             dist_at[(sid, t[2])] = float(d)
-    print(f"stop_times rows {n}, platform/line/direction combinations {len(use)}")
+    print(f"stop_times rows {n}, platform/line combinations {len(use)}")
 
-    best = {k: c.most_common(1)[0][0] for k, c in use.items()}
+    best = {k: c.most_common(1)[0][0] for k, c in use.items() if sum(c.values()) >= MIN_TRIPS}
+    print(f"with at least {MIN_TRIPS} trips: {len(best)}")
     need = set(best.values())
     shapes = defaultdict(list)  # shape_id -> [(seq, lat, lon, dist)]
     for r in rows("shapes.txt"):
@@ -139,9 +166,10 @@ def main():
     for sh in shapes.values():
         sh.sort()
 
-    by_name = defaultdict(list)  # stop name -> [(platform, route, headsign, shape)]
-    for (sid, rn, head), sh in best.items():
-        by_name[plat[sid][0]].append((sid, rn, head, sh))
+    by_name = defaultdict(list)  # stop name -> [(platform, route, headsigns, shape)]
+    for (sid, rn), sh in best.items():
+        hs = "|".join(h for h, c in heads[(sid, rn)].most_common() if c >= 1 and h)
+        by_name[plat[sid][0]].append((sid, rn, hs, sh))
 
     os.makedirs(OUT, exist_ok=True)
     for f in glob.glob(f"{OUT}/*.json"):
@@ -183,32 +211,18 @@ def main():
         if not spider:
             continue
         centre = (round(sum(lats) / len(lats)), round(sum(lons) / len(lons)))
-        a = write(f"{OUT}/{key}.json", centre, spider)
-        b = write(f"{OUT}/{key}_w.json", centre, whole)
-        tol = WHOLE_TOL
-        while b > MAX_BYTES and tol < 400:
-            tol *= 2
-            # Re-simplify the whole paths from their decoded form.
-            data = json.load(open(f"{OUT}/{key}_w.json"))["l"]
-            redone = []
-            for e in data:
-                lat, lon = e[3], e[4]
-                line = [(lat, lon)]
-                for i in range(5, len(e) - 1, 2):
-                    lat += e[i]
-                    lon += e[i + 1]
-                    line.append((lat, lon))
-                redone.append(encode(e[:3], simplify(line, tol)))
-            b = write(f"{OUT}/{key}_w.json", centre, redone)
+        a = shrink(f"{OUT}/{key}.json", centre, spider, SPIDER_TOL)
+        b = shrink(f"{OUT}/{key}_w.json", centre, whole, WHOLE_TOL)
         sizes.append((max(a, b), a, b, name))
     sizes.sort(reverse=True)
     print(f"Stops: {len(sizes)}, spider {sum(s[1] for s in sizes) / 1024:.0f} kB, "
           f"whole {sum(s[2] for s in sizes) / 1024:.0f} kB")
     for s in sizes[:5]:
         print(f"  {s[3]}: spider {s[1]} B, whole {s[2]} B")
-    over = [s for s in sizes if s[1] > MAX_BYTES]
+    over = [s for s in sizes if s[0] > MAX_BYTES]
     if over:
-        print(f"WARNING: {len(over)} spider files over {MAX_BYTES} B", file=sys.stderr)
+        print(f"WARNING: {len(over)} stops with a file over {MAX_BYTES} B: "
+              + ", ".join(s[3] for s in over[:10]), file=sys.stderr)
     for name in ("Anděl", "Florenc", "Hlavní nádraží"):
         print(f"Check: {name} -> {fnv1a(name)}")
 
