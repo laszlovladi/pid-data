@@ -1,0 +1,30 @@
+name: Prague map probe
+
+# Manual only: measures a simplified OSM scheme of Prague and pushes the
+# report and preview images to the map-probe branch (not to Pages).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pillow
+      - run: python tools/map_probe.py
+      - name: Push results to map-probe
+        run: |
+          git config user.name "pid-data bot"
+          git config user.email "actions@users.noreply.github.com"
+          git checkout --orphan map-probe
+          git rm -rq --cached .
+          git add probe
+          git commit -qm "Map probe $(date -u +%Y-%m-%d)"
+          git push -f origin map-probe
