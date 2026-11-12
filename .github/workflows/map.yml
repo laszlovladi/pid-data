@@ -1,0 +1,32 @@
+name: Prague map
+
+# Manual: builds the Prague scheme for the route map (docs/map, served by Pages).
+# OSM changes slowly; run it every few months.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python tools/build_map.py
+      - name: Commit
+        run: |
+          git config user.name "pid-data bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A docs/map
+          if git diff --cached --quiet -- docs/map; then
+            echo "Map unchanged."
+          else
+            git commit -m "Prague map $(date -u +%Y-%m-%d)"
+            git pull --rebase
+            git push
+          fi
