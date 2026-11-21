@@ -158,7 +158,7 @@ def main():
         return lines, plats, flat
 
     def write(path, build):
-        for lines_per_node, max_min in ((MAX_LINES, MAX_MIN), (2, MAX_MIN), (1, MAX_MIN), (1, 35), (1, 25)):
+        for lines_per_node, max_min in ((MAX_LINES, MAX_MIN), (2, MAX_MIN), (1, MAX_MIN), (1, 35), (1, 25), (1, 20), (1, 15)):
             s = json.dumps(build(lines_per_node, max_min), separators=(",", ":"))
             if len(s) <= MAX_BYTES:
                 break
