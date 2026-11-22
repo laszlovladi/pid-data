@@ -9,9 +9,10 @@ Runs in the nightly job after generate.ps1 and reuses its GTFS files
    "n": [node, ...],          GTFS node of each station (U1040Z101P -> 1040)
    "m": [name, ...],          station names
    "l": ["A", "AB", ...],     metro lines at each station
-   "t": [minutes, ...]}       n*n, from station i to station j: ride, plus at a
+   "s": "..."}                n*n minutes as characters chr(48 + minutes) ("/" = none,
+                              i == j), from station i to station j: ride, plus at a
                               metro-to-metro change the transfer walk and half the
-                              second line's interval; -1 when i == j
+                              second line's interval
 
 Minutes are typical daytime values (medians); the watch adds the wait for the
 first metro itself.
@@ -198,8 +199,11 @@ def main():
 
     write_shapes(seq, trips, trip_shape, nodes, names, lines_at, pos)
 
+    # Minutes packed as one character each (chr(48 + minutes), "/" = none): one short
+    # string instead of n*n numbers, which ran out of memory on the watch.
+    packed = "".join("/" if v < 0 else chr(48 + min(v, 120)) for v in table)
     out = {"date": datetime.date.today().isoformat(), "n": nodes, "m": [names[x] for x in nodes],
-           "l": ["".join(sorted(lines_at[x])) for x in nodes], "t": table,
+           "l": ["".join(sorted(lines_at[x])) for x in nodes], "s": packed,
            "w": {k: round(v / 2) for k, v in interval.items()}}
     s = json.dumps(out, separators=(",", ":"))
     with open("docs/metro.json", "w") as f:
