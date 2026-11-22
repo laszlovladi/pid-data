@@ -26,12 +26,15 @@ jobs:
       - name: Direct reach between stops (docs/reach, docs/into)
         run: python3 tools/build_reach.py
 
+      - name: Metro travel times (docs/metro.json)
+        run: python3 tools/build_metro.py
+
       - name: Commit if changed
         run: |
           git config user.name "pid-data bot"
           git config user.email "actions@users.noreply.github.com"
           git add docs
-          if git diff --cached --quiet -- docs/lines docs/shapes docs/stops docs/reach docs/into; then
+          if git diff --cached --quiet -- docs/lines docs/shapes docs/stops docs/reach docs/into docs/metro.json; then
             echo "Line data unchanged."
           else
             git commit -m "Line data $(date -u +%Y-%m-%d)"
