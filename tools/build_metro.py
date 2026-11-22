@@ -43,18 +43,88 @@ def secs(t):
     return int(h) * 3600 + int(m) * 60 + int(s)
 
 
+def simplify(line, tol):
+    """Douglas-Peucker on (lat, lon) in 1/100000 degree, tolerance in metres."""
+    if len(line) < 3:
+        return line
+    my, mx = 1.1132, 1.1132 * 0.642
+    pts = [(p[1] * mx, p[0] * my) for p in line]
+    keep = [False] * len(pts)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(pts) - 1)]
+    while stack:
+        a, b = stack.pop()
+        ax, ay = pts[a]
+        bx, by = pts[b]
+        dx, dy = bx - ax, by - ay
+        L = dx * dx + dy * dy
+        best, bi = -1.0, -1
+        for i in range(a + 1, b):
+            px, py = pts[i]
+            t = 0.0 if L == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L))
+            d = ((px - ax - t * dx) ** 2 + (py - ay - t * dy) ** 2) ** 0.5
+            if d > best:
+                best, bi = d, i
+        if best > tol:
+            keep[bi] = True
+            stack += [(a, bi), (bi, b)]
+    return [line[i] for i, k in enumerate(keep) if k]
+
+
+def write_shapes(seq, trips, trip_shape, nodes, names, lines_at, pos):
+    """docs/metro_shapes.json: {"l": {"A": [lat0, lon0, dlat, dlon, ...], ...},
+    "m": [station names], "p": [lat, lon, ...]} in 1/100000 degree (the trip map)."""
+    # Per line the shape of its longest trip (the whole line).
+    best = {}
+    for t, st in seq.items():
+        line = trips[t][0]
+        sh = trip_shape.get(t, "")
+        if sh and len(st) > best.get(line, ("", 0))[1]:
+            best[line] = (sh, len(st))
+    need = {sh for sh, _ in best.values()}
+    pts = defaultdict(list)
+    for r in rows("shapes.txt"):
+        if r["shape_id"] in need:
+            pts[r["shape_id"]].append((int(r["shape_pt_sequence"]), round(float(r["shape_pt_lat"]) * 1e5),
+                                       round(float(r["shape_pt_lon"]) * 1e5)))
+    lines = {}
+    for line, (sh, _) in sorted(best.items()):
+        p = [(a, b) for _, a, b in sorted(pts[sh])]
+        p = simplify(p, 20)
+        enc = [p[0][0], p[0][1]]
+        for i in range(1, len(p)):
+            enc += [p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]]
+        lines[line] = enc
+    flat = []
+    for x in nodes:
+        ps = pos.get(x) or [(0.0, 0.0)]
+        flat += [round(sum(a for a, _ in ps) / len(ps) * 1e5), round(sum(b for _, b in ps) / len(ps) * 1e5)]
+    out = {"l": lines, "m": [names[x] for x in nodes], "p": flat}
+    s = json.dumps(out, separators=(",", ":"))
+    with open("docs/metro_shapes.json", "w") as f:
+        f.write(s)
+    print(f"Metro shapes: {', '.join(f'{k} {len(v) // 2} points' for k, v in lines.items())}, {len(s)} bytes")
+
+
 def main():
     metro_routes = {r["route_id"]: r["route_short_name"].strip() for r in rows("routes.txt")
                     if (r.get("route_type") or "").strip() == "1"}
     trips = {t["trip_id"]: (metro_routes[t["route_id"]], t.get("service_id", ""), t.get("direction_id", ""))
              for t in rows("trips.txt") if t["route_id"] in metro_routes}
+    trip_shape = {t["trip_id"]: (t.get("shape_id") or "").strip()
+                  for t in rows("trips.txt") if t["route_id"] in metro_routes}
     print(f"metro lines {sorted(set(metro_routes.values()))}, trips {len(trips)}")
 
     stops = {}
+    pos = defaultdict(list)  # node -> [(lat, lon)] of its platforms
     for s in rows("stops.txt"):
         m = NODE_RE.match(s["stop_id"])
         if m:
             stops[s["stop_id"]] = (int(m.group(1)), (s.get("stop_name") or "").strip())
+            try:
+                pos[int(m.group(1))].append((float(s["stop_lat"]), float(s["stop_lon"])))
+            except (KeyError, ValueError):
+                pass
 
     seq = defaultdict(list)  # trip -> [(seq, node, arr, dep)]
     for r in rows("stop_times.txt"):
@@ -125,6 +195,8 @@ def main():
                                  + interval[lb] / 2 + ride_min[(lb, x, b)])
                             best = min(best or 1e9, v)
             table.append(round(best) if best is not None else -1)
+
+    write_shapes(seq, trips, trip_shape, nodes, names, lines_at, pos)
 
     out = {"date": datetime.date.today().isoformat(), "n": nodes, "m": [names[x] for x in nodes],
            "l": ["".join(sorted(lines_at[x])) for x in nodes], "t": table,
