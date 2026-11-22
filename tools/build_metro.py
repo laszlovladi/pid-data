@@ -63,15 +63,9 @@ def main():
             seq[t].append((int(r["stop_sequence"]), stops[r["stop_id"]][0],
                            secs(r["arrival_time"]), secs(r["departure_time"])))
 
-    # A Tuesday's services, for the intervals.
-    tuesday = set()
-    for c in rows("calendar.txt"):
-        if c.get("tuesday") == "1":
-            tuesday.add(c["service_id"])
-
     names, lines_at = {}, defaultdict(set)
     ride = defaultdict(list)  # (line, from node, to node) -> minutes
-    deps = defaultdict(list)  # (line, direction, node) -> departure seconds (Tuesday, daytime)
+    deps = defaultdict(list)  # (line, direction, node, service) -> departure seconds (daytime)
     for t, st in seq.items():
         st.sort()
         line, service, direction = trips[t]
@@ -80,8 +74,9 @@ def main():
         for i in range(len(st)):
             node = st[i][1]
             lines_at[node].add(line)
-            if service in tuesday and 7 * 3600 <= st[i][3] <= 19 * 3600:
-                deps[(line, direction, node)].append(st[i][3])
+            if 7 * 3600 <= st[i][3] <= 19 * 3600:
+                # Per service day: the feed holds several days (calendar may be empty).
+                deps[(line, direction, node, service)].append(st[i][3])
             for j in range(i + 1, len(st)):
                 ride[(line, node, st[j][1])].append((st[j][2] - st[i][3]) / 60.0)
     for sid, (node, name) in stops.items():
@@ -93,7 +88,7 @@ def main():
     interval = {}
     for line in sorted(set(metro_routes.values())):
         best = []
-        for (l, d, node), ds in deps.items():
+        for (l, d, node, service), ds in deps.items():
             if l == line and len(ds) > len(best):
                 best = sorted(ds)
         gaps = [b - a for a, b in zip(best, best[1:]) if b > a]
